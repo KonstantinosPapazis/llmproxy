@@ -1,0 +1,33 @@
+# Copy to terraform.tfvars and fill in with values/outputs from your existing
+# RDS, ElastiCache, ECS, and ALB Terraform.
+
+aws_region  = "eu-west-1"
+name_prefix = "litellm"
+
+tags = {
+  Project = "litellm"
+  Env     = "prod"
+}
+
+# Notifications
+alarm_email             = "oncall@example.com"
+extra_alarm_action_arns = [] # e.g. ["arn:aws:sns:eu-west-1:123456789012:slack-chatbot"]
+
+# ALB (use aws_lb.x.arn_suffix and aws_lb_target_group.x.arn_suffix)
+alb_arn_suffix          = "app/litellm-alb/0123456789abcdef"
+target_group_arn_suffix = "targetgroup/litellm-tg/0123456789abcdef"
+
+# ECS
+ecs_cluster_name               = "litellm-cluster"
+ecs_service_name               = "litellm-proxy"
+ecs_min_running_tasks          = 2
+ecs_container_insights_enabled = true
+
+# Aurora PostgreSQL Serverless v2
+rds_instance_id      = "litellm-aurora-instance-1" # writer instance id (DBInstanceIdentifier)
+rds_cluster_id       = "litellm-aurora"            # cluster id (DBClusterIdentifier)
+rds_is_aurora        = true
+rds_is_serverless_v2 = true
+
+# ElastiCache node ids (one per node in the replication group)
+elasticache_cluster_ids = ["litellm-redis-001", "litellm-redis-002"]

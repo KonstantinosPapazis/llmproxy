@@ -1,0 +1,119 @@
+# =============================================================================
+# LiteLLM Proxy - Production HA config
+# =============================================================================
+# Designed for multiple ECS tasks (multi-AZ) sharing state via ElastiCache Redis
+# and persisting to RDS/Aurora Postgres.
+#
+# Secrets are injected as environment variables (Secrets Manager / SSM):
+#   LITELLM_MASTER_KEY, LITELLM_SALT_KEY, DATABASE_URL,
+#   DATABASE_URL_READ_REPLICA (optional - Aurora reader endpoint),
+#   REDIS_HOST, REDIS_PORT, REDIS_PASSWORD, SLACK_WEBHOOK_URL,
+#   and your provider keys (e.g. AZURE_API_KEY, AZURE_API_BASE).
+#
+# Reference: https://docs.litellm.ai/docs/proxy/prod
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Models / deployments
+# -----------------------------------------------------------------------------
+# Define one entry per deployment. Multiple entries sharing the same `model_name`
+# are load balanced (and used as fallbacks). Set rpm/tpm per deployment so the
+# router can balance and cooldown correctly. Replace with your real deployments.
+model_list:
+  - model_name: gpt-4o
+    litellm_params:
+      model: azure/<your-azure-deployment-name>
+      api_base: os.environ/AZURE_API_BASE
+      api_key: os.environ/AZURE_API_KEY
+      api_version: "2025-01-01-preview"
+      rpm: 6
+  - model_name: gpt-4o
+    litellm_params:
+      model: azure/<your-second-azure-deployment>
+      api_base: os.environ/AZURE_API_BASE_2
+      api_key: os.environ/AZURE_API_KEY_2
+      api_version: "2025-01-01-preview"
+      rpm: 6
+
+# -----------------------------------------------------------------------------
+# Router settings - load balancing + shared rate-limit state (Redis)
+# -----------------------------------------------------------------------------
+router_settings:
+  # simple-shuffle is recommended for best performance in production.
+  # Avoid usage-based routing in prod (performance impact).
+  routing_strategy: simple-shuffle
+
+  # Share rpm/tpm + cooldown state across all ECS tasks via Redis.
+  # IMPORTANT: use host/port/password, NOT redis_url (redis_url is ~80 RPS slower).
+  redis_host: os.environ/REDIS_HOST
+  redis_port: os.environ/REDIS_PORT
+  redis_password: os.environ/REDIS_PASSWORD
+
+  # Resilience for provider outages.
+  num_retries: 3
+  allowed_fails: 3
+  cooldown_time: 30
+
+# -----------------------------------------------------------------------------
+# LiteLLM settings - caching + auth cache + logging
+# -----------------------------------------------------------------------------
+litellm_settings:
+  # Shared response cache + virtual-key auth cache live in Redis.
+  cache: true
+  cache_params:
+    type: redis
+    host: os.environ/REDIS_HOST
+    port: os.environ/REDIS_PORT
+    password: os.environ/REDIS_PASSWORD
+    # Max Redis connections in the pool per worker. Total Redis connections
+    # scale with (max_connections x workers x tasks); tune for your load.
+    max_connections: 100
+
+  # Raise a Timeout error if a call takes longer than this (seconds).
+  request_timeout: 600
+
+  # Production logging hygiene.
+  set_verbose: false
+  json_logs: true
+
+  # Prometheus metrics for CloudWatch / Grafana scraping.
+  # (Some metrics/UI features require LiteLLM Enterprise.)
+  callbacks: ["prometheus"]
+
+# -----------------------------------------------------------------------------
+# General settings - keys, DB, spend buffering, graceful degradation
+# -----------------------------------------------------------------------------
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+
+  # Spend tracking + virtual keys (Aurora PostgreSQL Serverless v2).
+  # DATABASE_URL -> cluster (writer) endpoint.
+  # Optionally also set env DATABASE_URL_READ_REPLICA -> Aurora reader endpoint so
+  # read-only queries are routed to the reader and leave the writer headroom.
+  database_url: os.environ/DATABASE_URL
+
+  # Route spend writes through Redis to prevent DB connection exhaustion and
+  # deadlocks under bursty/high traffic.
+  use_redis_transaction_buffer: true
+
+  # Share virtual-key auth lookups across tasks (fewer DB reads on cache miss).
+  enable_redis_auth_cache: true
+
+  # Batch-write spend updates every N seconds instead of per-request.
+  proxy_batch_write_at: 60
+
+  # Per-worker DB connection pool limit.
+  # total DB connections = database_connection_pool_limit x workers x tasks
+  # Keep total well below RDS max_connections (e.g. 10 x 1 x 3 = 30).
+  database_connection_pool_limit: 10
+
+  # Reduce DB write pressure from LLM exception logging.
+  disable_error_logs: true
+
+  # VPC-ONLY: keep serving LLM traffic if Postgres has a brief outage.
+  # Auth/budget enforcement degrades, but the gateway stays up. Do NOT enable
+  # if the proxy is reachable from the public internet.
+  allow_requests_on_db_unavailable: true
+
+  # Alerting on exceptions, budget alerts, and slow responses (set SLACK_WEBHOOK_URL).
+  alerting: ["slack"]
